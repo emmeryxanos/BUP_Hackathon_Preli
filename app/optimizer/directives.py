@@ -6,9 +6,25 @@ Shared by both the LP builder (model.py) and the final replay validator
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List
 
 from app.schemas import Battery, DirectiveInterpretation, HourEntry
+
+
+@dataclass
+class DirectiveContext:
+    """Bundles the per-hour effect of a validated directive list.
+
+    A single bundle so model.py's fallback-relaxation ladder can construct
+    progressively relaxed variants without re-deriving every field by hand.
+    """
+
+    effective_solar: List[float]
+    reserve_kwh: List[float]
+    no_charge_hours: set
+    no_discharge_hours: set
+    max_grid_kwh: List[float]  # math.inf where uncapped
 
 
 def effective_solar(hours: List[HourEntry], directives: List[DirectiveInterpretation]) -> List[float]:

@@ -1,9 +1,17 @@
 """LLM client for operator-note interpretation.
 
-Uses the Anthropic API (Claude) with tool-use for reliable structured output.
-The LLM is squarely on the interpretation critical path, satisfying the
-challenge's mandatory LLM requirement. All output is treated as untrusted
-and passed through app.interpreter.guardrails before use.
+Calls AgentRouter (an OpenAI-compatible proxy in front of Claude models) via
+httpx.AsyncClient, with tool-calling for reliable structured output. The LLM
+is squarely on the interpretation critical path, satisfying the challenge's
+mandatory LLM requirement. All output is treated as untrusted and passed
+through app.interpreter.guardrails before use.
+
+A primary key/model is tried first (LLM_MAX_RETRIES attempts on top of the
+initial one); if every primary attempt fails, a fallback key/model is tried
+once. This function never raises: on total failure it returns an empty
+directive list, letting the caller (app.interpreter.interpret_notes) apply
+guardrails.validate_all's safe no_op fallback for every note rather than the
+service crashing (Problem Statement Section 08, "SAFE FAILURE").
 """
 from __future__ import annotations
 
@@ -12,78 +20,133 @@ import logging
 import os
 from typing import Any, Dict, List
 
+import httpx
+
+from app.config import LLM_BASE_URL, LLM_FALLBACK_MODEL, LLM_MAX_RETRIES, LLM_MODEL, LLM_REQUEST_TIMEOUT_SECONDS
 from app.interpreter.prompts import SYSTEM_PROMPT, TOOL_SCHEMA, build_user_message
 
 logger = logging.getLogger("gridwise.llm")
 
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
-LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "20"))
+LLM_API_KEY_ENV = "LLM_API_KEY"
+LLM_FALLBACK_API_KEY_ENV = "LLM_FALLBACK_API_KEY"
+
+_OPENAI_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": TOOL_SCHEMA["name"],
+        "description": TOOL_SCHEMA["description"],
+        "parameters": TOOL_SCHEMA["input_schema"],
+    },
+}
 
 
 class LLMUnavailableError(Exception):
-    """Raised when the LLM call fails or returns unusable output."""
+    """Raised internally between attempts; never escapes call_llm_for_directives."""
 
 
-def _get_client():
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise LLMUnavailableError("ANTHROPIC_API_KEY is not configured")
-    import anthropic  # imported lazily so the module loads without the SDK installed
-
-    return anthropic.Anthropic(api_key=api_key, timeout=LLM_TIMEOUT_SECONDS)
+_client: httpx.AsyncClient | None = None
 
 
-def call_llm_for_directives(operator_notes: List[str]) -> List[Dict[str, Any]]:
-    """Call the LLM once and return its raw (untrusted) directive list.
+def _get_client() -> httpx.AsyncClient:
+    """Lazily create and reuse one AsyncClient for the process lifetime.
 
-    Raises LLMUnavailableError on any provider/network/parsing failure so the
-    caller can apply a safe no_op fallback instead of crashing the service.
+    Creating/closing a fresh httpx.AsyncClient per call is not just wasteful
+    (loses connection pooling); on Windows' default ProactorEventLoop it can
+    also trigger native access-violation crashes when combined with
+    TestClient's sync-to-async thread bridging. A single long-lived client
+    avoids both problems.
     """
-    client = _get_client()
-    try:
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=2048,
-            system=SYSTEM_PROMPT,
-            tools=[TOOL_SCHEMA],
-            tool_choice={"type": "tool", "name": "interpret_notes"},
-            messages=[{"role": "user", "content": build_user_message(operator_notes)}],
-        )
-    except Exception as exc:  # network, auth, rate-limit, timeout, etc.
-        raise LLMUnavailableError(f"LLM call failed: {exc}") from exc
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient()
+    return _client
 
-    for block in response.content:
-        if getattr(block, "type", None) == "tool_use" and block.name == "interpret_notes":
-            directives = block.input.get("directives")
+
+def _extract_directives_from_completion(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    try:
+        choice = data["choices"][0]
+        tool_calls = choice["message"].get("tool_calls") or []
+    except (KeyError, IndexError, TypeError) as exc:
+        raise LLMUnavailableError(f"Malformed completion response: {exc}") from exc
+
+    for call in tool_calls:
+        if call.get("function", {}).get("name") == TOOL_SCHEMA["name"]:
+            try:
+                arguments = json.loads(call["function"]["arguments"])
+            except (KeyError, ValueError) as exc:
+                raise LLMUnavailableError(f"Malformed tool-call arguments: {exc}") from exc
+            directives = arguments.get("directives")
             if isinstance(directives, list):
                 return directives
             raise LLMUnavailableError("LLM tool output missing 'directives' list")
 
-    raise LLMUnavailableError("LLM did not return a tool_use block")
+    raise LLMUnavailableError("LLM did not return a tool call")
 
 
-def call_llm_raw_text_fallback(operator_notes: List[str]) -> List[Dict[str, Any]]:
-    """Secondary path for providers/models without tool-use: ask for raw JSON."""
-    client = _get_client()
-    prompt = (
-        SYSTEM_PROMPT
-        + "\n\nRespond with ONLY a JSON object of the form "
-        + '{"directives": [...]} and no other text.\n\n'
-        + build_user_message(operator_notes)
-    )
+async def _call_completion(
+    client: httpx.AsyncClient, api_key: str, model: str, operator_notes: List[str]
+) -> List[Dict[str, Any]]:
+    if not api_key:
+        raise LLMUnavailableError(f"{LLM_API_KEY_ENV} is not configured")
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": build_user_message(operator_notes)},
+        ],
+        "tools": [_OPENAI_TOOL_SCHEMA],
+        "tool_choice": {"type": "function", "function": {"name": TOOL_SCHEMA["name"]}},
+        "max_tokens": 2048,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
     try:
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
+        response = await client.post(
+            f"{LLM_BASE_URL.rstrip('/')}/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=LLM_REQUEST_TIMEOUT_SECONDS,
         )
-        text = "".join(
-            block.text for block in response.content if getattr(block, "type", None) == "text"
-        )
-        parsed = json.loads(text)
-        directives = parsed.get("directives")
-        if isinstance(directives, list):
-            return directives
-        raise ValueError("missing 'directives' key")
-    except Exception as exc:
-        raise LLMUnavailableError(f"LLM raw-text fallback failed: {exc}") from exc
+        response.raise_for_status()
+        data = response.json()
+    except httpx.HTTPError as exc:
+        raise LLMUnavailableError(f"LLM call failed: {exc}") from exc
+
+    return _extract_directives_from_completion(data)
+
+
+async def call_llm_for_directives(operator_notes: List[str]) -> List[Dict[str, Any]]:
+    """Call the LLM (with retries, then a fallback key/model).
+
+    Returns the raw (untrusted) directive list on success, or an empty list
+    if the primary key/model exhausted its retries and the fallback (if
+    configured) also failed -- this function never raises.
+    """
+    primary_key = os.environ.get(LLM_API_KEY_ENV)
+    fallback_key = os.environ.get(LLM_FALLBACK_API_KEY_ENV)
+
+    last_error: Exception | None = None
+    attempts = max(1, LLM_MAX_RETRIES + 1)
+    client = _get_client()
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await _call_completion(client, primary_key, LLM_MODEL, operator_notes)
+        except LLMUnavailableError as exc:
+            last_error = exc
+            logger.warning("Primary LLM call attempt %d/%d failed: %s", attempt, attempts, exc)
+
+    if fallback_key:
+        try:
+            return await _call_completion(client, fallback_key, LLM_FALLBACK_MODEL, operator_notes)
+        except LLMUnavailableError as exc:
+            last_error = exc
+            logger.warning("Fallback LLM call failed: %s", exc)
+
+    logger.error(
+        "All LLM interpretation attempts failed; falling back to no_op for all notes. "
+        "Last error: %s",
+        last_error,
+    )
+    return []

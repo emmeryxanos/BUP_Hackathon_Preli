@@ -34,8 +34,8 @@ def _summarize(directive_count_applied: int, total_cost: float, total_grid: floa
     )
 
 
-def run_pipeline(request: OptimizeEnergyRequest) -> OptimizeEnergyResponse:
-    directive_interpretation = interpret_notes(
+async def run_pipeline(request: OptimizeEnergyRequest) -> OptimizeEnergyResponse:
+    directive_interpretation = await interpret_notes(
         request.operator_notes, request.battery.capacity_kwh
     )
 

@@ -175,3 +175,192 @@ def test_validate_all_empty_llm_output_produces_all_no_op():
     out = validate_all([], num_notes=3, battery_capacity_kwh=500)
     assert len(out) == 3
     assert all(e["directive_type"] == "no_op" and e["applies"] is False for e in out)
+
+
+def test_hours_as_numeric_strings_coerced():
+    raw = {
+        "note_index": 0,
+        "directive_type": "no_charge_window",
+        "applies": True,
+        "structured_adjustment": {"hours": ["1", "2"]},
+        "explanation": "string hours",
+    }
+    out = validate_directive(raw, 0, battery_capacity_kwh=500)
+    assert out["directive_type"] == "no_charge_window"
+    assert out["structured_adjustment"]["hours"] == [1, 2]
+
+
+def test_non_numeric_hours_falls_back_to_no_op():
+    raw = {
+        "note_index": 0,
+        "directive_type": "no_charge_window",
+        "applies": True,
+        "structured_adjustment": {"hours": ["a", "b"]},
+        "explanation": "bad",
+    }
+    out = validate_directive(raw, 0, battery_capacity_kwh=500)
+    assert out["directive_type"] == "no_op"
+
+
+def test_empty_hours_list_falls_back_to_no_op():
+    raw = {
+        "note_index": 0,
+        "directive_type": "no_charge_window",
+        "applies": True,
+        "structured_adjustment": {"hours": []},
+        "explanation": "empty",
+    }
+    out = validate_directive(raw, 0, battery_capacity_kwh=500)
+    assert out["directive_type"] == "no_op"
+
+
+def test_hours_not_a_list_falls_back_to_no_op():
+    raw = {
+        "note_index": 0,
+        "directive_type": "no_charge_window",
+        "applies": True,
+        "structured_adjustment": {"hours": "not-a-list"},
+        "explanation": "wrong type",
+    }
+    out = validate_directive(raw, 0, battery_capacity_kwh=500)
+    assert out["directive_type"] == "no_op"
+
+
+def test_structured_adjustment_not_a_dict_falls_back_to_no_op():
+    raw = {
+        "note_index": 0,
+        "directive_type": "no_charge_window",
+        "applies": True,
+        "structured_adjustment": "not-a-dict",
+        "explanation": "wrong type",
+    }
+    out = validate_directive(raw, 0, battery_capacity_kwh=500)
+    assert out["directive_type"] == "no_op"
+
+
+def test_negative_max_grid_kwh_falls_back_to_no_op():
+    raw = {
+        "note_index": 0,
+        "directive_type": "max_grid_window",
+        "applies": True,
+        "structured_adjustment": {"hours": [1], "max_grid_kwh": -10},
+        "explanation": "negative",
+    }
+    out = validate_directive(raw, 0, battery_capacity_kwh=500)
+    assert out["directive_type"] == "no_op"
+
+
+def test_nan_factor_falls_back_to_no_op():
+    raw = {
+        "note_index": 0,
+        "directive_type": "solar_reduction",
+        "applies": True,
+        "structured_adjustment": {"hours": [1], "factor": float("nan")},
+        "explanation": "nan",
+    }
+    out = validate_directive(raw, 0, battery_capacity_kwh=500)
+    assert out["directive_type"] == "no_op"
+
+
+def test_boundary_factor_values_accepted():
+    for factor in (0.0, 1.0):
+        raw = {
+            "note_index": 0,
+            "directive_type": "solar_reduction",
+            "applies": True,
+            "structured_adjustment": {"hours": [1], "factor": factor},
+            "explanation": "boundary",
+        }
+        out = validate_directive(raw, 0, battery_capacity_kwh=500)
+        assert out["directive_type"] == "solar_reduction"
+        assert out["structured_adjustment"]["factor"] == factor
+
+
+def test_missing_directive_type_falls_back_to_no_op():
+    raw = {
+        "note_index": 0,
+        "applies": True,
+        "structured_adjustment": {"hours": [1]},
+        "explanation": "no type field",
+    }
+    out = validate_directive(raw, 0, battery_capacity_kwh=500)
+    assert out["directive_type"] == "no_op"
+
+
+def test_explanation_truncated_to_500_chars():
+    raw = {
+        "note_index": 0,
+        "directive_type": "no_op",
+        "applies": False,
+        "structured_adjustment": None,
+        "explanation": "x" * 1000,
+    }
+    out = validate_directive(raw, 0, battery_capacity_kwh=500)
+    assert len(out["explanation"]) == 500
+
+
+def test_hour_at_upper_and_lower_bound_accepted():
+    raw = {
+        "note_index": 0,
+        "directive_type": "no_charge_window",
+        "applies": True,
+        "structured_adjustment": {"hours": [0, 23]},
+        "explanation": "boundary hours",
+    }
+    out = validate_directive(raw, 0, battery_capacity_kwh=500)
+    assert out["directive_type"] == "no_charge_window"
+    assert out["structured_adjustment"]["hours"] == [0, 23]
+
+
+def test_validate_all_out_of_range_note_index_dropped():
+    raw_entries = [
+        {
+            "note_index": 5,  # out of range for num_notes=2
+            "directive_type": "no_charge_window",
+            "applies": True,
+            "structured_adjustment": {"hours": [1]},
+            "explanation": "out of range",
+        }
+    ]
+    out = validate_all(raw_entries, num_notes=2, battery_capacity_kwh=500)
+    assert len(out) == 2
+    assert all(e["directive_type"] == "no_op" for e in out)
+
+
+def test_validate_all_non_integer_note_index_falls_back_to_position():
+    raw_entries = [
+        {
+            "note_index": "not-a-number",
+            "directive_type": "no_charge_window",
+            "applies": True,
+            "structured_adjustment": {"hours": [1]},
+            "explanation": "bad index type",
+        }
+    ]
+    out = validate_all(raw_entries, num_notes=1, battery_capacity_kwh=500)
+    assert len(out) == 1
+    assert out[0]["note_index"] == 0
+    assert out[0]["directive_type"] == "no_charge_window"
+
+
+def test_validate_all_preserves_order_for_multiple_valid_notes():
+    raw_entries = [
+        {
+            "note_index": 1,
+            "directive_type": "no_charge_window",
+            "applies": True,
+            "structured_adjustment": {"hours": [5]},
+            "explanation": "second note",
+        },
+        {
+            "note_index": 0,
+            "directive_type": "no_discharge_window",
+            "applies": True,
+            "structured_adjustment": {"hours": [6]},
+            "explanation": "first note",
+        },
+    ]
+    out = validate_all(raw_entries, num_notes=2, battery_capacity_kwh=500)
+    assert [e["note_index"] for e in out] == [0, 1]
+    assert out[0]["directive_type"] == "no_discharge_window"
+    assert out[1]["directive_type"] == "no_charge_window"

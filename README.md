@@ -31,7 +31,7 @@ Energy Data + Operator Notes
 - **LLM role**: interprets each operator note into one of 6 supported directive types
   (`solar_reduction`, `minimum_battery_reserve`, `no_charge_window`, `no_discharge_window`,
   `max_grid_window`, `no_op`) via LLM tool-calling (structured output), against an
-  OpenAI-compatible endpoint (AgentRouter, serving Claude models). The LLM is
+  OpenAI-compatible endpoint. The LLM is
   on the critical path that produces the constraints given to the optimizer — it is not used
   only for `plan_summary`/documentation text.
 - **Guardrails**: pure deterministic Python. Rejects unsupported directive types, out-of-range
@@ -56,10 +56,10 @@ Energy Data + Operator Notes
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `LLM_PROVIDER` | No | `agentrouter` | Provider label (informational; the client is OpenAI-compatible) |
-| `LLM_API_KEY` | Yes | — | Auth for the primary LLM interpretation call |
-| `LLM_MODEL` | No | `claude-haiku-4-5` | Model used for operator-note interpretation |
-| `LLM_BASE_URL` | No | `https://agentrouter.org/v1` | OpenAI-compatible base URL |
+| `LLM_PROVIDER` | No | `openai` | Provider label (informational; the client is OpenAI-compatible) |
+| `OPENAI_API_KEY` | Yes | — | Auth for the primary LLM interpretation call |
+| `LLM_MODEL` | No | `gpt-4o-mini` | Model used for operator-note interpretation |
+| `LLM_BASE_URL` | No | `https://api.openai.com/v1` | OpenAI-compatible base URL |
 | `LLM_REQUEST_TIMEOUT_SECONDS` | No | `12` | Per-call LLM timeout |
 | `LLM_MAX_RETRIES` | No | `1` | Retries against the primary key/model before falling back |
 | `LLM_FALLBACK_API_KEY` | No | — | Backup key, tried once if the primary key/model exhausts its retries |
@@ -69,7 +69,7 @@ Energy Data + Operator Notes
 | `NUMERIC_TOLERANCE` | No | `0.01` | Matches `TOL` in `app/optimizer/validator.py` |
 | `LOG_LEVEL` | No | `INFO` | Logging verbosity |
 
-Copy `.env.example` to `.env` and fill in `LLM_API_KEY` (and optionally `LLM_FALLBACK_API_KEY`)
+Copy `.env.example` to `.env` and fill in `OPENAI_API_KEY` (and optionally `LLM_FALLBACK_API_KEY`)
 locally. Do not commit `.env`.
 
 ## Local quickstart (clean environment)
@@ -85,7 +85,7 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# edit .env and set LLM_API_KEY=sk-... (and optionally LLM_FALLBACK_API_KEY=sk-...)
+# edit .env and set OPENAI_API_KEY=sk-... (and optionally LLM_FALLBACK_API_KEY=sk-...)
 
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
@@ -162,18 +162,26 @@ OS, not a production risk. See the module docstring in `tests/test_api.py` for d
 
 ```bash
 docker build -t gridwise-api .
-docker run -p 8000:8000 -e LLM_API_KEY=sk-... gridwise-api
+docker run -p 8000:8000 -e OPENAI_API_KEY=sk-... gridwise-api
 curl http://localhost:8000/health
 ```
 
 The image binds to `0.0.0.0:8000`, contains no baked-in secrets, and takes the API key only
-via the `LLM_API_KEY` environment variable at run time.
+via the `OPENAI_API_KEY` environment variable at run time.
+
+## Deploying on Render
+
+Use the included [render.yaml](render.yaml) blueprint for a Python web service. Render will
+install from `requirements.txt` and start the app with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+
+Set `OPENAI_API_KEY` in the Render dashboard before the first deploy. The other defaults already
+match the repo's local configuration, but you can override them there if needed.
 
 ## Model / provider
 
-- Provider: AgentRouter, an OpenAI-compatible proxy in front of Claude models, called over
-  plain HTTP via `httpx` (no vendor SDK dependency).
-- Model: configurable via `LLM_MODEL` (defaults to `claude-haiku-4-5`); a separate
+- Provider: OpenAI-compatible chat-completions API, called over plain HTTP via `httpx`
+  (no vendor SDK dependency).
+- Model: configurable via `LLM_MODEL` (defaults to `gpt-4o-mini`); a separate
   `LLM_FALLBACK_API_KEY`/`LLM_FALLBACK_MODEL` pair is tried once if the primary key/model
   exhausts `LLM_MAX_RETRIES` attempts.
 - The LLM is invoked once per request (per attempt) through OpenAI-style tool-calling with a

@@ -23,10 +23,10 @@ def _int_env(name: str, default: int) -> int:
     return int(raw)
 
 
-# ── LLM Provider (AgentRouter -- OpenAI-compatible) ──────────────────────
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "agentrouter")
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://agentrouter.org/v1")
-LLM_MODEL = os.environ.get("LLM_MODEL", "claude-haiku-4-5")
+# ── LLM Provider (OpenAI-compatible) ─────────────────────────────────────
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1")
+LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 LLM_REQUEST_TIMEOUT_SECONDS = _float_env("LLM_REQUEST_TIMEOUT_SECONDS", 12.0)
 # Number of attempts against the primary key (including the first) before
 # falling back to LLM_FALLBACK_API_KEY.

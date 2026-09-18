@@ -1,4 +1,4 @@
-"""Tests for app/interpreter/llm_client.py (AgentRouter, OpenAI-compatible over httpx).
+"""Tests for app/interpreter/llm_client.py (OpenAI-compatible over httpx).
 
 httpx.AsyncClient.post is mocked throughout, so no network access or real API
 key is used. Covers the primary call, retry-then-fallback-key/model behavior,
@@ -19,7 +19,7 @@ from app.interpreter.llm_client import call_llm_for_directives
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
-    monkeypatch.setenv("LLM_API_KEY", "sk-primary-fake-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-primary-fake-key")
     monkeypatch.delenv("LLM_FALLBACK_API_KEY", raising=False)
     monkeypatch.setattr(llm_client, "LLM_MAX_RETRIES", 1)
 
@@ -43,7 +43,7 @@ def _tool_call_response(directives, name="interpret_notes"):
                 }
             ]
         },
-        request=httpx.Request("POST", "https://agentrouter.org/v1/chat/completions"),
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
     )
 
 
@@ -51,7 +51,7 @@ def _no_tool_call_response():
     return httpx.Response(
         200,
         json={"choices": [{"message": {}}]},
-        request=httpx.Request("POST", "https://agentrouter.org/v1/chat/completions"),
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
     )
 
 
@@ -84,10 +84,11 @@ async def test_call_llm_for_directives_sends_bearer_auth_header(monkeypatch):
     await call_llm_for_directives(["a note"])
 
     assert captured["headers"]["Authorization"] == "Bearer sk-primary-fake-key"
-    assert captured["url"] == "https://agentrouter.org/v1/chat/completions"
+    assert captured["url"] == "https://api.openai.com/v1/chat/completions"
 
 
 async def test_missing_primary_key_returns_empty_list(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     directives = await call_llm_for_directives(["a note"])
     assert directives == []
@@ -113,7 +114,7 @@ async def test_directives_not_a_list_returns_empty_list(monkeypatch):
                 }
             ]
         },
-        request=httpx.Request("POST", "https://agentrouter.org/v1/chat/completions"),
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
     )
     _patch_post(monkeypatch, lambda *a, **kw: resp)
     directives = await call_llm_for_directives(["a note"])
@@ -167,7 +168,7 @@ async def test_both_primary_and_fallback_failing_returns_empty_list(monkeypatch)
 
 async def test_malformed_completion_shape_returns_empty_list(monkeypatch):
     resp = httpx.Response(
-        200, json={"unexpected": "shape"}, request=httpx.Request("POST", "https://agentrouter.org/v1/chat/completions")
+        200, json={"unexpected": "shape"}, request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
     )
     _patch_post(monkeypatch, lambda *a, **kw: resp)
     directives = await call_llm_for_directives(["a note"])

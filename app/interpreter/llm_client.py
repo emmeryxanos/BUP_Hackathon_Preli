@@ -1,10 +1,10 @@
 """LLM client for operator-note interpretation.
 
-Calls AgentRouter (an OpenAI-compatible proxy in front of Claude models) via
-httpx.AsyncClient, with tool-calling for reliable structured output. The LLM
-is squarely on the interpretation critical path, satisfying the challenge's
-mandatory LLM requirement. All output is treated as untrusted and passed
-through app.interpreter.guardrails before use.
+Calls an OpenAI-compatible chat-completions endpoint via httpx.AsyncClient,
+with tool-calling for reliable structured output. The LLM is squarely on the
+interpretation critical path, satisfying the challenge's mandatory LLM
+requirement. All output is treated as untrusted and passed through
+app.interpreter.guardrails before use.
 
 A primary key/model is tried first (LLM_MAX_RETRIES attempts on top of the
 initial one); if every primary attempt fails, a fallback key/model is tried
@@ -27,7 +27,8 @@ from app.interpreter.prompts import SYSTEM_PROMPT, TOOL_SCHEMA, build_user_messa
 
 logger = logging.getLogger("gridwise.llm")
 
-LLM_API_KEY_ENV = "LLM_API_KEY"
+LLM_API_KEY_ENV = "OPENAI_API_KEY"
+LEGACY_LLM_API_KEY_ENV = "LLM_API_KEY"
 LLM_FALLBACK_API_KEY_ENV = "LLM_FALLBACK_API_KEY"
 
 _OPENAI_TOOL_SCHEMA = {
@@ -123,7 +124,7 @@ async def call_llm_for_directives(operator_notes: List[str]) -> List[Dict[str, A
     if the primary key/model exhausted its retries and the fallback (if
     configured) also failed -- this function never raises.
     """
-    primary_key = os.environ.get(LLM_API_KEY_ENV)
+    primary_key = os.environ.get(LLM_API_KEY_ENV) or os.environ.get(LEGACY_LLM_API_KEY_ENV)
     fallback_key = os.environ.get(LLM_FALLBACK_API_KEY_ENV)
 
     last_error: Exception | None = None

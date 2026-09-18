@@ -59,7 +59,7 @@ async def test_llm_malformed_output_still_guarded(monkeypatch):
 async def test_missing_api_key_returns_empty_list_not_raises(monkeypatch):
     from app.interpreter.llm_client import call_llm_for_directives
 
-    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_FALLBACK_API_KEY", raising=False)
     directives = await call_llm_for_directives(["some note"])
     assert directives == []
